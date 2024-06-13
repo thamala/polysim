@@ -1,0 +1,70 @@
+/*
+	Tuomas Hämälä, October 2023.
+	SLiM 3 (v3.7) script for simulating genetic load in diploids.
+	Dominance (h) is calculated based on the selection coefficient (s) of each mutation following Huber et al. 2018 (Nat Comms).
+	Fitness effects are defined using ploidy-intependent dominance weight following Layman & Buch 2018 (Evolution).
+	
+	This model is used as a comparison to autotetraploid models. All mutations are neutral.
+*/
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+	
+	defineConstant("K", 9184); // carrying capacity
+	defineConstant("L", 1e5); // total bp length
+	
+	initializeMutationType("m0", 0.5, "f", 0); // neutral mutations
+	m0.convertToSubstitution = T;
+	m0.mutationStackPolicy = "f";
+	
+	initializeGenomicElementType("g1", m0, 1);
+	initializeGenomicElement(g1, 0, L - 1);
+	initializeMutationRate(1.39e-07);
+	initializeRecombinationRate(5.6e-07);
+}
+
+
+reproduction(p1){
+    mate = p1.sampleIndividuals(1); // choose a random mate
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between paternal chromosomes
+	p1.addRecombinant(genome1, genome2, b1, mate.genome1, mate.genome2, b2);
+}
+
+1 early(){
+	sim.addSubpop("p1", K);
+	sim.tag = 0;
+	defineConstant("simID", getSeed());
+}
+
+early() {
+	p1.fitnessScaling = K / p1.individualCount;
+}
+
+
+1:141840 late(){
+	if(sim.generation % 500 != 0 & sim.generation != 81840 & sim.generation != 91840)
+		return;
+	gen = sim.generation - 91840;
+	if(sim.generation < 81840){
+		catn("Generation "+gen);
+		return;
+	}
+	else{
+		ploidy = 2;
+		pi = estPi();
+		catn("Generation "+gen+", Ploidy = "+ploidy+", N = "+p1.individualCount+", pi = "+pi);
+		if(sim.tag == 0){
+			writeFile("/users/tuomaham/kage/slim/neutral/dip_neutral_"+simID+".txt",paste("gen n ploidy pi"));
+			sim.tag = 1;
+		}
+		writeFile("/users/tuomaham/kage/slim/neutral/dip_neutral_"+simID+".txt",paste(gen+" "+p1.individualCount+" "+ploidy+" "+pi), append=T);
+	}
+}
+
+function (float)estPi(void){
+	inds = p1.individuals;
+	neut_freq = inds.genomes.mutationFrequenciesInGenomes(sim.mutationsOfType(m0));
+	pi = 2 * sum(neut_freq * (1 - neut_freq)) / L;
+	return pi;
+}

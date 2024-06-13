@@ -1,0 +1,281 @@
+/*
+	Tuomas Hämälä, October 2023.
+	SLiM 3 (v3.7) script for simulating genetic load in autotetraploids.
+	The approach for simulating tetraploid individuals is based on a script by Peter Ralph and Ben Haller, available at: https://github.com/MesserLab/SLiM-Extras/blob/b8414fd182b4672a36ac2c0d7f6b58a7f66c6953/models/autotetraploid.slim
+	Compared to the simple example above, this model starts the population as diploid and switches to autotetraploid by having some / all individuals go through a whole-genome duplication.
+	Dominance (h) is calculated based on the selection coefficient (s) of each mutation following Huber et al. 2018 (Nat Comms).
+	Fitness effects are defined using ploidy-independent dominance weight following Layman & Buch 2018 (Evolution).
+	
+	In this model, tetraploids go through a founding bottleneck.
+*/
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+	
+	defineConstant("K", 9184); // carrying capacity
+	defineConstant("L", 1e5); // total bp length
+	defineGlobal("NEXT_TAG", 0);  // used to provide unique values
+	
+	initializeMutationType("m0", 0.5, "f", 0); // neutral mutations
+	m0.convertToSubstitution = T;
+	m0.mutationStackPolicy = "f";
+	initializeMutationType("m1", 0, "g", -0.0485, 0.2280); //deleterious mutations
+	m1.convertToSubstitution = T;
+	m1.mutationStackPolicy = "f";
+	
+	initializeGenomicElementType("g1", c(m0, m1), c(0.3623188, 0.6376812));
+	initializeGenomicElement(g1, 0, L - 1);
+	initializeMutationRate(1.39e-07);
+	initializeRecombinationRate(5.6e-07);
+}
+
+// reproduction for diploids
+1:91839 reproduction(p1){
+	mate = p1.sampleIndividuals(1); // choose a random mate
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between paternal chromosomes
+	p1.addRecombinant(genome1, genome2, b1, mate.genome1, mate.genome2, b2);
+}
+
+// fitness effects for diploids
+1:91839 fitness(m1){
+	if(homozygous)
+		return 1.0 + mut.selectionCoeff;
+	h = 1 / ((1 / 0.978) - 50328 * mut.selectionCoeff); // h is defined based on s
+	return 1.0 + h * mut.selectionCoeff;
+}
+
+// set up a diploid population
+1 early(){
+	sim.addSubpop("p1", K);
+	sim.tag = 0;
+	defineConstant("simID", getSeed());
+}
+
+// fitness scaling
+early() {
+	p1.fitnessScaling = K / p1.individualCount;
+}
+
+// at generation 91840, a new tetraploid population is formed
+// for computational efficiency, this is done by keeping 10 individuals and marking others for death
+91839 late(){
+	keep = sample(p1.individuals, 10, F);
+	alive = rep(0.0, p1.individualCount);
+	alive[keep.index] = 1.0;
+	p1.individuals.fitnessScaling = alive;
+	sim.addSubpop("p2",0);
+}
+
+// switch to autotetraploidy is achieved by cloning individuals from p1 to p2
+91840 reproduction(p1){
+	for(k in seqLen(p1.individualCount)){
+		duplicate = p2.addCloned(p1.individuals[k]);
+		tag = NEXT_TAG;
+		defineGlobal("NEXT_TAG", NEXT_TAG + 1);
+		p1.individuals[k].tagF = tag;
+		duplicate.tagF = tag;
+		p1.individuals[k].tag = k;
+	}
+	self.active = 0; // code is only ran once
+}
+
+// reproduction for tetraploids
+91841: reproduction(p1){
+	mate = p1.sampleIndividuals(1); // choose a random mate
+	ma_chroms = c(individual.genomes, p2.individuals[individual.tag].genomes); // 4 maternal chromosomes
+	pa_chroms = c(mate.genomes, p2.individuals[mate.tag].genomes); // 4 paternal chromosomes
+	
+	ma_order = sample(seqLen(4), 4); // set up random chromosome pairing
+	pa_order = sample(seqLen(4), 4);
+	
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between first 2 maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between first 2 paternal chromosomes
+	diploid1 = p1.addRecombinant(ma_chroms[ma_order[0]], ma_chroms[ma_order[1]], b1, pa_chroms[pa_order[0]], pa_chroms[pa_order[1]], b2); // add recombination events to the offspring genome 1
+	
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between second 2 maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between second 2 paternal chromosomes
+	diploid2 = p2.addRecombinant(ma_chroms[ma_order[2]], ma_chroms[ma_order[3]], b1, pa_chroms[pa_order[2]], pa_chroms[pa_order[3]], b2); // add recombination events to the offspring genome 2
+		
+	tag = NEXT_TAG; // set up a tag to identify the two genomes
+	defineGlobal("NEXT_TAG", NEXT_TAG + 1);
+	diploid1.tagF = tag;
+	diploid2.tagF = tag;
+}
+
+91841: early(){
+	// initialize tags for new inds
+	inds = p1.individuals[p1.individuals.age == 0];
+	others = p2.individuals[p2.individuals.age == 0];
+	idx = match(inds.tagF, others.tagF);
+	inds.tag = others.index[idx];
+	
+	// mark no-longer-alive p2 individuals for death
+	inds = p1.individuals;
+	alive = rep(0.0, p2.individualCount);
+	alive[inds.tag] = 1.0;
+	p2.individuals.fitnessScaling = alive;
+	// update tags to reflect this; note the update must be deferred
+	// until after mortality, so that tags are correct in fitness()
+	// note we are assuming that death won't rearrange their relative orders
+	tag_map = asInteger(cumSum(alive) - 1);
+	for(ind in inds)
+		ind.setValue("newTag", tag_map[ind.tag]);
+}
+
+// fitness effects for tetraploids
+91840: fitness(m1, p1){
+	other = p2.individuals[individual.tag];
+	if(individual.tagF != other.tagF)
+		stop("ERROR in fitness(): tagF values "+individual.tagF+" != "+other.tagF);
+	n = sum(individual.genomes.containsMutations(mut))+sum(other.genomes.containsMutations(mut)); // count of mutations across the 4 chromosomes
+	if(n == 4)
+		return 1.0 + mut.selectionCoeff;
+	h = 1 / ((1 / 0.978) - 50328 * mut.selectionCoeff); // h is defined based on s
+	h_x = estDomWeight(h, n / 4); // estimate dominance weight
+	return 1.0 + h_x * mut.selectionCoeff;
+}
+
+// mutations are neutral in p2
+91840: fitness(m1, p2){
+	return 1.0; // muts are neutral in p2
+}
+
+91841: late() {
+	// do the deferred tag update now that mortality has occurred
+	// note additional individuals might have died due to selection and
+	// density-dependent fitness; they will be cleaned up next tick
+	inds = p1.individuals;
+	newTags = inds.getValue("newTag");
+	inds.tag = newTags;
+}
+
+1:141840 late(){
+	if(sim.generation % 500 != 0 & sim.generation != 81840 & sim.generation != 91840)
+		return;
+	gen = sim.generation - 91840;
+	if(sim.generation < 81840){
+		catn("Generation "+gen);
+		return;
+	}
+	else{
+		if(sim.generation < 91840){
+			ploidy = 2;
+			pi = estPi(ploidy);
+			dfe = estDFE(ploidy);
+			fit = estFit2x();
+		}
+		else{ // print output for tetraploids	
+			ploidy = 4;
+			pi = estPi(ploidy);
+			dfe = estDFE(ploidy);
+			fit = estFit4x();
+		}
+		catn("Generation "+gen+", Ploidy = "+ploidy+", N = "+p1.individualCount+", Del_freq = "+pi[0]+", Del_fix = "+pi[1]+", piN = "+pi[2]+", piS = "+pi[3]+", DFE1 = "+dfe[0]+", DFE2 = "+dfe[1]+", DFE3 = "+dfe[2]+", DFE4 = "+dfe[3]+", DFE5 = "+dfe[4]+", Fitness = "+fit);
+		if(sim.tag == 0){
+			writeFile("/users/tuomaham/kage/slim/load/tet_bottl_"+simID+".txt",paste("gen n ploidy del_freq del_fix piN piS dfe1 dfe2 dfe3 dfe4 dfe5 fitness"));
+			sim.tag = 1;
+		}
+		writeFile("/users/tuomaham/kage/slim/load/tet_bottl_"+simID+".txt",paste(gen+" "+p1.individualCount+" "+ploidy+" "+pi[0]+" "+pi[1]+" "+pi[2]+" "+pi[3]+" "+dfe[0]+" "+dfe[1]+" "+dfe[2]+" "+dfe[3]+" "+dfe[4]+" "+fit), append=T);
+	}
+}
+
+// function for estimating dominance weight
+function (float)estDomWeight(float h, float x){
+	k = 2 * h;
+	y = log(1 / h - 1) / log(1 / (2 * h));
+	h_x = 1 / (1 + (1 / k) ^ y * ((1 - x) / x));
+	return h_x;
+}
+
+// function for calculating diversity statistics
+function (float)estPi(integer ploidy){
+	if(ploidy == 4)
+		inds = c(p1.individuals, p2.individuals[p1.individuals.tag]);
+	else
+		inds = p1.individuals;
+	del_freq = inds.genomes.mutationFrequenciesInGenomes(sim.mutationsOfType(m1));
+	del_fix = sum(del_freq == 1) + sum(sim.substitutions.mutationType == m1);
+	neut_freq = inds.genomes.mutationFrequenciesInGenomes(sim.mutationsOfType(m0));
+	piN = 2 * sum(del_freq * (1 - del_freq)) / (L * 0.6376812);
+	piS = 2 * sum(neut_freq * (1 - neut_freq)) / (L * 0.3623188);
+	if(length(del_freq) == 0)
+		del_freq = 0.0;
+	else
+		del_freq = mean(del_freq);
+	return c(del_freq, del_fix, piN, piS);
+}
+
+// function for partitioning mutations based on their selection coefficients in diploids
+function (integer)estDFE(integer ploidy){
+	if(ploidy == 4)
+		inds = c(p1.individuals, p2.individuals[p1.individuals.tag]);
+	else
+		inds = p1.individuals;
+	muts = inds.genomes.mutationsOfType(m1);
+	dfe = c();
+	dfe = c(dfe, sum(muts.selectionCoeff > -0.0001));
+	dfe = c(dfe, sum(muts.selectionCoeff <= -0.0001 & muts.selectionCoeff > -0.001));
+	dfe = c(dfe, sum(muts.selectionCoeff <= -0.001 & muts.selectionCoeff > -0.01));
+	dfe = c(dfe, sum(muts.selectionCoeff <= -0.01 & muts.selectionCoeff > -0.1));
+	dfe = c(dfe, sum(muts.selectionCoeff <= -0.1));
+	return dfe;
+}
+
+// function for estimating fitness in diploids
+function (float)estFit2x(void){
+	inds = p1.individuals;
+	fit_tot = c();
+	for(i in inds){
+		fit_ind = c();
+		del = i.genomes.mutationsOfType(m1);
+		uniq = unique(del.id);
+		if(length(uniq) > 0){
+			for(u in uniq){
+				n = del[del.id == u];
+				if(length(n) == 2)
+					fit = 1.0 + n.selectionCoeff[0];
+				else{
+					h = 1 / (1 / 0.978 - 50328 * n.selectionCoeff[0]);
+					fit = 1.0 + h * n.selectionCoeff[0];
+				}
+				fit_ind = c(fit_ind, fit);
+			}
+		}
+		else
+			fit_ind = c(fit_ind, 1.0);
+		fit_tot = c(fit_tot, product(fit_ind));	
+	}
+	return mean(fit_tot);
+}
+
+// function for estimating fitness in tetraploids
+function (float)estFit4x(void){
+	inds = p1.individuals;
+	fit_tot = c();
+	for(i in inds){
+		j = p2.individuals[i.tag];
+		if(i.tagF != j.tagF)
+			stop("ERROR in estFit4x(): tagF values "+i.tagF+" != "+j.tagF);
+		fit_ind = c();
+		del = c(i.genomes.mutationsOfType(m1),j.genomes.mutationsOfType(m1));
+		uniq = unique(del.id);
+		if(length(uniq) > 0){
+			for(u in uniq){
+				n = del[del.id == u];
+				if(length(n) == 4)
+					fit = 1.0 + n.selectionCoeff[0];
+				else{
+					h = 1 / (1 / 0.978 - 50328 * n.selectionCoeff[0]);
+					h_x = estDomWeight(h, length(n) / 4);
+					fit = 1.0 + h_x * n.selectionCoeff[0];
+				}
+				fit_ind = c(fit_ind, fit);
+			}
+		}
+		else
+			fit_ind = c(fit_ind, 1.0);
+		fit_tot = c(fit_tot, product(fit_ind));	
+	}
+	return mean(fit_tot);
+}
