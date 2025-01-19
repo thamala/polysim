@@ -166,11 +166,11 @@ early() {
 			fit = estFit4x();
 		}
 		catn("Generation "+gen+", Ploidy = "+ploidy+", N = "+p1.individualCount+", Del_freq = "+pi[0]+", Del_fix = "+pi[1]+", piN = "+pi[2]+", piS = "+pi[3]+", DFE1 = "+dfe[0]+", DFE2 = "+dfe[1]+", DFE3 = "+dfe[2]+", DFE4 = "+dfe[3]+", DFE5 = "+dfe[4]+", Fitness = "+fit);
-		/*if(sim.tag == 0){
+		if(sim.tag == 0){
 			writeFile("/users/tuomaham/kage/slim/load/tet_stable_"+simID+".txt",paste("gen n ploidy del_freq del_fix piN piS dfe1 dfe2 dfe3 dfe4 dfe5 fitness"));
 			sim.tag = 1;
 		}
-		writeFile("/users/tuomaham/kage/slim/load/tet_stable_"+simID+".txt",paste(gen+" "+p1.individualCount+" "+ploidy+" "+pi[0]+" "+pi[1]+" "+pi[2]+" "+pi[3]+" "+dfe[0]+" "+dfe[1]+" "+dfe[2]+" "+dfe[3]+" "+dfe[4]+" "+fit), append=T);*/
+		writeFile("/users/tuomaham/kage/slim/load/tet_stable_"+simID+".txt",paste(gen+" "+p1.individualCount+" "+ploidy+" "+pi[0]+" "+pi[1]+" "+pi[2]+" "+pi[3]+" "+dfe[0]+" "+dfe[1]+" "+dfe[2]+" "+dfe[3]+" "+dfe[4]+" "+fit), append=T);
 	}
 }
 
