@@ -1,0 +1,256 @@
+/*
+	Tuomas Hämälä, April 2025.
+	SLiM 4 (v4.3) script for simulating genetic load in autotetraploids.
+	The approach for simulating tetraploid individuals is based on a script by William W. Booker, available at: https://github.com/MesserLab/SLiM-Extras/blob/28715fb12a23ed0013dae53e2d30e923a61968d5/models/autotetraploid.slim
+	Compared to the simple example above, this model starts the population as diploid and switches to autotetraploid by having some / all individuals go through a whole-genome duplication.
+	Dominance (h) is calculated based on the selection coefficient (s) of each mutation following Huber et al. 2018 (Nat Comms).
+	Fitness effects are defined using ploidy-independent dominance weight following Layman & Buch 2018 (Evolution).
+	
+	In this model, tetraploids don't go through a founding bottleneck and mutations have dominance coefficients comparable to diploids.
+*/
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+	
+	defineConstant("K", 9184); // carrying capacity
+	defineConstant("L", 1e5); // total bp length
+	defineGlobal("C_TAG", 0.0);  // used to provide unique values
+	
+	initializeMutationType("m0", 0.5, "f", 0); // neutral mutations
+	m0.convertToSubstitution = T;
+	m0.mutationStackPolicy = "f";
+	initializeMutationType("m1", 0.5, "f", 0); // deleterious mutations
+	m1.convertToSubstitution = T;
+	m1.mutationStackPolicy = "f";
+	
+	initializeGenomicElementType("g1", c(m0, m1), c(0.3623188, 0.6376812));
+	initializeGenomicElement(g1, 0, L - 1);
+	initializeMutationRate(1.39e-07);
+	initializeRecombinationRate(5.6e-07);
+}
+
+mutation(m1){
+	s = rgamma(1, -0.0485, 0.2280); // selection coefficient
+	mut.setValue("s", s);
+	h = estDom(s); // dominance coefficient
+	mut.setValue("h_d", c(0.0, h, 1.0)); // dominance vector for diploids
+	mut.setValue("h_t", c(0.0, h, h, 1.0, 1.0)); // dominance vector for tetraploids
+	return T;
+}
+
+// calculate fitness using fitnessEffect, because mutationEffect does not detect mutations only present in the storage pop
+fitnessEffect(){
+	if(sim.cycle < 91840)
+		genomes = individual.genomes;
+	else{
+		if(individual.subpopulation == p2)
+			return 1.0;
+		other = p2.individuals[individual.tag];
+		if(individual.tagF != other.tagF)
+			stop("ERROR in fitnessEffect(): tagF values "+individual.tagF+" != "+other.tagF);
+		genomes = c(individual.genomes,other.genomes);
+	}
+	
+	mutations = unique(genomes.mutationsOfType(m1));
+	if(length(mutations) == 0)
+		return 1.0;
+	mut_counts = genomes.mutationCountsInGenomes(mutations);
+	
+	// calculate fitness for all mutations then take the product of that vector to get multiplicative fitness
+	if(sim.cycle < 91840)
+		fit_vector = sapply(seqAlong(mutations), "mut = mutations[applyValue]; count = mut_counts[applyValue]; 1 + mut.getValue('h_d')[count] * mut.getValue('s');"); // diploids
+	else
+		fit_vector = sapply(seqAlong(mutations), "mut = mutations[applyValue]; count = mut_counts[applyValue]; 1 + mut.getValue('h_t')[count] * mut.getValue('s');"); // tetraploids
+	return product(fit_vector);
+}
+
+// reproduction for diploids
+1:91839 reproduction(p1){
+	mate = p1.sampleIndividuals(1); // choose a random mate
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between paternal chromosomes
+	p1.addRecombinant(individual.genome1, individual.genome2, b1, mate.genome1, mate.genome2, b2);
+}
+
+// set up a diploid population
+1 early(){
+	sim.addSubpop("p1", K);
+	sim.tag = 0;
+	defineConstant("simID", getSeed());
+}
+
+// fitness scaling
+early() {
+	p1.fitnessScaling = K / p1.individualCount;
+}
+
+91839 late(){
+	sim.addSubpop("p2",0);
+}
+
+// switch to autotetraploidy is achieved by cloning individuals from p1 to p2
+91840 reproduction(p1){
+	for(k in seqLen(p1.individualCount)){
+		duplicate = p2.addCloned(p1.individuals[k]);
+		tag = C_TAG;
+		defineGlobal("C_TAG", C_TAG + 1);
+		p1.individuals[k].tagF = tag;
+		duplicate.tagF = tag;
+		p1.individuals[k].tag = k;
+	}
+	self.active = 0; // code is only ran once
+}
+
+// reproduction for tetraploids
+91841: reproduction(p1){
+	mate = p1.sampleIndividuals(1); // choose a random mate
+	ma_chroms = c(individual.genomes, p2.individuals[individual.tag].genomes); // 4 maternal chromosomes
+	pa_chroms = c(mate.genomes, p2.individuals[mate.tag].genomes); // 4 paternal chromosomes
+	
+	ma_order = sample(seqLen(4), 4); // set up random chromosome pairing
+	pa_order = sample(seqLen(4), 4);
+	
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between first 2 maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between first 2 paternal chromosomes
+	diploid1 = p1.addRecombinant(ma_chroms[ma_order[0]], ma_chroms[ma_order[1]], b1, pa_chroms[pa_order[0]], pa_chroms[pa_order[1]], b2); // add recombination events to the offspring genome 1
+	
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between second 2 maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between second 2 paternal chromosomes
+	diploid2 = p2.addRecombinant(ma_chroms[ma_order[2]], ma_chroms[ma_order[3]], b1, pa_chroms[pa_order[2]], pa_chroms[pa_order[3]], b2); // add recombination events to the offspring genome 2
+		
+	tag = C_TAG; // set up a tag to identify the two genomes
+	defineGlobal("C_TAG", C_TAG + 1);
+	diploid1.tagF = tag;
+	diploid2.tagF = tag;
+}
+
+91841: early(){
+	// initialize tags for new inds
+	inds = p1.individuals[p1.individuals.age == 0];
+	others = p2.individuals[p2.individuals.age == 0];
+	idx = match(inds.tagF, others.tagF);
+	inds.tag = others.index[idx];
+	
+	// mark no-longer-alive p2 individuals for death
+	inds = p1.individuals;
+	alive = rep(0.0, p2.individualCount);
+	alive[inds.tag] = 1.0;
+	p2.individuals.fitnessScaling = alive;
+	// update tags to reflect this; note the update must be deferred
+	// until after mortality, so that tags are correct in fitnessEffect()
+	// note we are assuming that death won't rearrange their relative orders
+	tag_map = asInteger(cumSum(alive) - 1);
+	for(ind in inds)
+		ind.setValue("newTag", tag_map[ind.tag]);
+}
+
+
+91841: late() {
+	// do the deferred tag update now that mortality has occurred
+	// note additional individuals might have died due to selection and
+	// density-dependent fitness; they will be cleaned up next tick
+	inds = p1.individuals;
+	newTags = inds.getValue("newTag");
+	inds.tag = newTags;
+}
+
+1:98000 late(){
+	gen = sim.cycle - 91840;
+	if(sim.cycle < 91840 & gen % 500 == 0)
+		catn("Generation "+gen);
+	else if(sim.cycle >= 91840 & gen % 50 == 0){
+		if(sim.cycle < 91840)
+			ploidy = 2;
+		else
+			ploidy = 4;
+		pi = estPi(ploidy);
+		dfe = countMuts(ploidy);
+		fit = estFit(ploidy);
+		catn("Generation "+gen+", Ploidy = "+ploidy+", N = "+p1.individualCount+", Del_freq = "+pi[0]+", Del_fix = "+pi[1]+", piN = "+pi[2]+", piS = "+pi[3]+", DFE1 = "+dfe[0]+", DFE2 = "+dfe[1]+", DFE3 = "+dfe[2]+", DFE4 = "+dfe[3]+", DFE5 = "+dfe[4]+", Fitness = "+fit);
+		
+		if(sim.tag == 0){
+			writeFile("/users/tuomaham/kage/slim/load/tet_stable_dom_comp_"+simID+".txt",paste("gen n ploidy del_freq del_fix piN piS dfe1 dfe2 dfe3 dfe4 dfe5 fitness"));
+			sim.tag = 1;
+		}
+		writeFile("/users/tuomaham/kage/slim/load/tet_stable_dom_comp_"+simID+".txt",paste(gen+" "+p1.individualCount+" "+ploidy+" "+pi[0]+" "+pi[1]+" "+pi[2]+" "+pi[3]+" "+dfe[0]+" "+dfe[1]+" "+dfe[2]+" "+dfe[3]+" "+dfe[4]+" "+fit), append=T);
+	}
+}
+
+// function for estimating dominance coefficients
+function (float)estDom(float s){
+	h = 1 / ((1 / 0.978) - 50328 * s);
+	return h;
+}
+
+// function for estimating dominance weight
+function (float)estDomWeight(float h, float x){
+	k = 2 * h;
+	y = log(1 / h - 1) / log(1 / (2 * h));
+	h_x = 1 / (1 + (1 / k) ^ y * ((1 - x) / x));
+	return h_x;
+}
+
+// function for calculating diversity statistics
+function (float)estPi(integer ploidy){
+	if(ploidy == 4)
+		inds = c(p1.individuals, p2.individuals[p1.individuals.tag]);
+	else
+		inds = p1.individuals;
+	del_freq = inds.genomes.mutationFrequenciesInGenomes(sim.mutationsOfType(m1));
+	del_fix = sum(del_freq == 1) + sum(sim.substitutions.mutationType == m1);
+	neut_freq = inds.genomes.mutationFrequenciesInGenomes(sim.mutationsOfType(m0));
+	piN = 2 * sum(del_freq * (1 - del_freq)) / (L * 0.6376812);
+	piS = 2 * sum(neut_freq * (1 - neut_freq)) / (L * 0.3623188);
+	if(length(del_freq) == 0)
+		del_freq = 0.0;
+	else
+		del_freq = mean(del_freq);
+	return c(del_freq, del_fix, piN, piS);
+}
+
+// function for partitioning mutations based on their selection coefficients
+function (integer)countMuts(integer ploidy){
+	if(ploidy == 4)
+		inds = c(p1.individuals, p2.individuals[p1.individuals.tag]);
+	else
+		inds = p1.individuals;
+	muts = inds.genomes.mutationsOfType(m1);
+	if(length(muts) == 0)
+		return c(0,0,0,0,0);
+	dfe = c();
+	dfe = c(dfe, sum(muts.getValue('s') > -0.0001));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.0001 & muts.getValue('s') > -0.001));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.001 & muts.getValue('s') > -0.01));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.01 & muts.getValue('s') > -0.1));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.1));
+	return dfe;
+}
+
+// function for estimating fitness
+// we don't use cachedFitness, because it's before latest mortality
+function (float)estFit(integer ploidy){
+	inds = p1.individuals;
+	fit_inds = c();
+	for(individual in inds){
+		if(ploidy == 2)
+			genomes = individual.genomes;
+		else{
+			other = p2.individuals[individual.tag];
+			if(individual.tagF != other.tagF)
+				stop("ERROR in estFit(): tagF values "+individual.tagF+" != "+other.tagF);
+			genomes = c(individual.genomes,other.genomes);
+		}
+		mutations = unique(genomes.mutationsOfType(m1));
+		if(length(mutations) == 0)
+			fit_inds = c(fit_inds, 1.0);
+		else{
+			mut_counts = genomes.mutationCountsInGenomes(mutations);
+			if(ploidy == 2)
+				fit_vector = sapply(seqAlong(mutations), "mut = mutations[applyValue]; count = mut_counts[applyValue]; 1 + mut.getValue('h_d')[count] * mut.getValue('s');"); // diploids
+			else
+				fit_vector = sapply(seqAlong(mutations), "mut = mutations[applyValue]; count = mut_counts[applyValue]; 1 + mut.getValue('h_t')[count] * mut.getValue('s');"); // tetraploids
+			fit_inds = c(fit_inds, product(fit_vector));
+		}
+	}
+	return mean(fit_inds);
+}

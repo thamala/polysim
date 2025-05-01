@@ -1,0 +1,134 @@
+/*
+	Tuomas Hämälä, April 2025.
+	SLiM 4 (v4.3) script for simulating genetic load in diploids.
+	Dominance (h) is calculated based on the selection coefficient (s) of each mutation following Huber et al. 2018 (Nat Comms).
+	Fitness effects are defined using ploidy-intependent dominance weight following Layman & Buch 2018 (Evolution).
+	
+	This model is used as a comparison to autotetraploid models. All mutations are dominant.
+*/
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+	
+	defineConstant("K", 9184); // carrying capacity
+	defineConstant("L", 1e5); // total bp length
+	
+	initializeMutationType("m0", 0.5, "f", 0); // neutral mutations
+	m0.convertToSubstitution = T;
+	m0.mutationStackPolicy = "f";
+	initializeMutationType("m1", 0.5, "f", 0); // deleterious mutations
+	m1.convertToSubstitution = T;
+	m0.mutationStackPolicy = "f";
+	
+	initializeGenomicElementType("g1", c(m0, m1), c(0.3623188, 0.6376812));
+	initializeGenomicElement(g1, 0, L - 1);
+	initializeMutationRate(1.39e-07);
+	initializeRecombinationRate(5.6e-07);
+}
+
+mutation(m1){
+	s = rgamma(1, -0.0485, 0.2280); // selection coefficient
+	mut.setValue("s", s);
+	mut.setValue("h_d", c(0.0, 1.0, 1.0)); // dominance vector for diploids
+	return T;
+}
+
+fitnessEffect(){
+	genomes = individual.genomes;
+	mutations = unique(genomes.mutationsOfType(m1));
+	if(length(mutations) == 0)
+		return 1.0;
+	mut_counts = genomes.mutationCountsInGenomes(mutations);
+	fit_vector = sapply(seqAlong(mutations), "mut = mutations[applyValue]; count = mut_counts[applyValue]; 1 + mut.getValue('h_d')[count] * mut.getValue('s');"); // diploids
+	return product(fit_vector);
+}
+
+
+reproduction(p1){
+    mate = p1.sampleIndividuals(1); // choose a random mate
+	b1 = sim.chromosome.drawBreakpoints(); // breakpoints between maternal chromosomes
+	b2 = sim.chromosome.drawBreakpoints(); // breakpoints between paternal chromosomes
+	p1.addRecombinant(individual.genome1, individual.genome2, b1, mate.genome1, mate.genome2, b2);
+}
+
+1 early(){
+	sim.addSubpop("p1", K);
+	sim.tag = 0;
+	defineConstant("simID", getSeed());
+}
+
+early() {
+	p1.fitnessScaling = K / p1.individualCount;
+}
+
+1:141840 late(){
+	gen = sim.cycle - 91840;
+	if(sim.cycle < 91840 & gen % 500 == 0)
+		catn("Generation "+gen);
+	else if(sim.cycle >= 91840 & gen % 50 == 0){
+		ploidy = 2;
+		pi = estPi();
+		dfe = countMuts();
+		fit = estFit();
+		catn("Generation "+gen+", Ploidy = "+ploidy+", N = "+p1.individualCount+", Del_freq = "+pi[0]+", Del_fix = "+pi[1]+", piN = "+pi[2]+", piS = "+pi[3]+", DFE1 = "+dfe[0]+", DFE2 = "+dfe[1]+", DFE3 = "+dfe[2]+", DFE4 = "+dfe[3]+", DFE5 = "+dfe[4]+", Fitness = "+fit);
+		
+		if(sim.tag == 0){
+			writeFile("/users/tuomaham/kage/slim/load/dip_dominant_"+simID+".txt",paste("gen n ploidy del_freq del_fix piN piS dfe1 dfe2 dfe3 dfe4 dfe5 fitness"));
+			sim.tag = 1;
+		}
+		writeFile("/users/tuomaham/kage/slim/load/dip_dominant_"+simID+".txt",paste(gen+" "+p1.individualCount+" "+ploidy+" "+pi[0]+" "+pi[1]+" "+pi[2]+" "+pi[3]+" "+dfe[0]+" "+dfe[1]+" "+dfe[2]+" "+dfe[3]+" "+dfe[4]+" "+fit), append=T);
+	}
+}
+
+// function for estimating dominance coefficients
+function (float)estDom(float s){
+	h = 1 / ((1 / 0.978) - 50328 * s);
+	return h;
+}
+
+function (float)estPi(void){
+	inds = p1.individuals;
+	del_freq = inds.genomes.mutationFrequenciesInGenomes(sim.mutationsOfType(m1));
+	del_fix = sum(del_freq == 1) + sum(sim.substitutions.mutationType == m1);
+	neut_freq = inds.genomes.mutationFrequenciesInGenomes(sim.mutationsOfType(m0));
+	piN = 2 * sum(del_freq * (1 - del_freq)) / (L * 0.6376812);
+	piS = 2 * sum(neut_freq * (1 - neut_freq)) / (L * 0.3623188);
+	if(length(del_freq) == 0)
+		del_freq = 0.0;
+	else
+		del_freq = mean(del_freq);
+	return c(del_freq, del_fix, piN, piS);
+}
+
+function (integer)countMuts(void){
+	inds = p1.individuals;
+	muts = inds.genomes.mutationsOfType(m1);
+	if(length(muts) == 0)
+		return c(0,0,0,0,0);
+	dfe = c();
+	dfe = c(dfe, sum(muts.getValue('s') > -0.0001));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.0001 & muts.getValue('s') > -0.001));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.001 & muts.getValue('s') > -0.01));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.01 & muts.getValue('s') > -0.1));
+	dfe = c(dfe, sum(muts.getValue('s') <= -0.1));
+	return dfe;
+}
+
+// function for estimating fitness
+// we don't use cachedFitness because it's before latest mortality
+function (float)estFit(void){
+	inds = p1.individuals;
+	fit_inds = c();
+	for(individual in inds){
+		genomes = individual.genomes;
+		mutations = unique(genomes.mutationsOfType(m1));
+		if(length(mutations) == 0)
+			fit_inds = c(fit_inds, 1.0);
+		else{
+			mut_counts = genomes.mutationCountsInGenomes(mutations);
+			fit_vector = sapply(seqAlong(mutations), "mut = mutations[applyValue]; count = mut_counts[applyValue]; 1 + mut.getValue('h_d')[count] * mut.getValue('s');");
+			fit_inds = c(fit_inds, product(fit_vector));
+		}
+	}
+	return mean(fit_inds);
+}
